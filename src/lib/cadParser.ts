@@ -1,10 +1,114 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
 
 export interface CadEntity {
   type: string;
   layer?: string;
   color?: number;
   vertices: number[];
+}
+
+/**
+ * Extracts embedded PNG preview snapshot from a binary SketchUp (.skp) file.
+ * SketchUp automatically encodes a high-resolution 2D camera viewport thumbnail in .skp files.
+ */
+export function extractSkpThumbnail(buffer: ArrayBuffer): string | null {
+  const bytes = new Uint8Array(buffer);
+  const pngHeader = [137, 80, 78, 71, 13, 10, 26, 10]; // 0x89 PNG \r\n\x1a\n
+  let startIndex = -1;
+
+  for (let i = 0; i < bytes.length - 8; i++) {
+    if (
+      bytes[i] === pngHeader[0] &&
+      bytes[i + 1] === pngHeader[1] &&
+      bytes[i + 2] === pngHeader[2] &&
+      bytes[i + 3] === pngHeader[3] &&
+      bytes[i + 4] === pngHeader[4] &&
+      bytes[i + 5] === pngHeader[5] &&
+      bytes[i + 6] === pngHeader[6] &&
+      bytes[i + 7] === pngHeader[7]
+    ) {
+      startIndex = i;
+      break;
+    }
+  }
+
+  if (startIndex === -1) return null;
+
+  // Search for IEND marker: [73, 69, 78, 68] (IEND) + 4 bytes CRC
+  const iend = [73, 69, 78, 68];
+  let endIndex = -1;
+  for (let i = startIndex; i < bytes.length - 8; i++) {
+    if (
+      bytes[i] === iend[0] &&
+      bytes[i + 1] === iend[1] &&
+      bytes[i + 2] === iend[2] &&
+      bytes[i + 3] === iend[3]
+    ) {
+      endIndex = i + 8;
+      break;
+    }
+  }
+
+  if (endIndex === -1 || endIndex <= startIndex) return null;
+
+  try {
+    const pngSlice = bytes.subarray(startIndex, endIndex);
+    let binary = '';
+    const chunk = 8192;
+    for (let i = 0; i < pngSlice.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, Array.from(pngSlice.subarray(i, i + chunk)));
+    }
+    return `data:image/png;base64,${btoa(binary)}`;
+  } catch (e) {
+    console.warn('Failed to encode extracted SKP thumbnail:', e);
+    return null;
+  }
+}
+
+/**
+ * Loads a GLTF / GLB model from an ArrayBuffer
+ */
+export function parseGltfToThree(buffer: ArrayBuffer): Promise<THREE.Group> {
+  return new Promise((resolve, reject) => {
+    const loader = new GLTFLoader();
+    loader.parse(
+      buffer,
+      '',
+      (gltf) => {
+        const group = new THREE.Group();
+        group.name = 'SketchUp_GLTF_Model';
+        group.add(gltf.scene);
+        resolve(group);
+      },
+      (error) => {
+        reject(error);
+      }
+    );
+  });
+}
+
+/**
+ * Loads a Collada (.dae) model from XML text (Default 3D export in SketchUp Free/Make/Pro)
+ */
+export function parseColladaToThree(daeText: string): Promise<THREE.Group> {
+  return new Promise((resolve, reject) => {
+    try {
+      const loader = new ColladaLoader();
+      const collada = loader.parse(daeText, '');
+      const group = new THREE.Group();
+      group.name = 'SketchUp_Collada_Model';
+      if (collada && collada.scene) {
+        group.add(collada.scene);
+        resolve(group);
+      } else {
+        reject(new Error('Falha ao processar cena Collada DAE'));
+      }
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
 
 /**

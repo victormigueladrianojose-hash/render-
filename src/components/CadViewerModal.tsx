@@ -18,6 +18,9 @@ import {
 import { 
   parseDxfToThree, 
   parseObjToThree, 
+  parseGltfToThree,
+  parseColladaToThree,
+  extractSkpThumbnail,
   createSampleSketchUpVilla, 
   createSampleAutoCadFloorplan 
 } from '../lib/cadParser';
@@ -46,6 +49,15 @@ export const CadViewerModal: React.FC<CadViewerModalProps> = ({
   const [captureResolution, setCaptureResolution] = useState<RenderResolution>('4K');
   const [isRotating, setIsRotating] = useState(false);
   const [sunAngle, setSunAngle] = useState(45);
+
+  // SketchUp .skp preview and guide states
+  const [skpModalData, setSkpModalData] = useState<{
+    fileName: string;
+    previewUrl: string | null;
+  } | null>(null);
+  const [showExportGuide, setShowExportGuide] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isParsing, setIsParsing] = useState(false);
 
   // Orbit controls state
   const isDraggingRef = useRef(false);
@@ -230,26 +242,68 @@ export const CadViewerModal: React.FC<CadViewerModalProps> = ({
     updateCameraPosition();
   };
 
-  // File Upload (.obj or .dxf)
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // File Upload with multi-format support: .skp, .dae, .gltf, .glb, .obj, .dxf, and 2D images
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setUploadError(null);
+    setIsParsing(true);
     const fileName = file.name.toLowerCase();
-    const reader = new FileReader();
 
-    reader.onload = (event) => {
-      const content = event.target?.result as string;
-      if (fileName.endsWith('.dxf')) {
-        const group = parseDxfToThree(content);
-        loadModel(group, `AutoCAD DXF (${file.name})`);
+    try {
+      if (fileName.endsWith('.skp')) {
+        // Native SketchUp binary file: extract high-res embedded camera thumbnail
+        const arrayBuf = await file.arrayBuffer();
+        const extractedThumbnail = extractSkpThumbnail(arrayBuf);
+        setSkpModalData({
+          fileName: file.name,
+          previewUrl: extractedThumbnail,
+        });
+      } else if (fileName.endsWith('.dae')) {
+        // Collada format (universal built-in 3D export in SketchUp Free/Make/Pro)
+        const text = await file.text();
+        const group = await parseColladaToThree(text);
+        loadModel(group, `SketchUp Collada 3D (${file.name})`);
+      } else if (fileName.endsWith('.gltf') || fileName.endsWith('.glb')) {
+        // GLTF / GLB format
+        const arrayBuf = await file.arrayBuffer();
+        const group = await parseGltfToThree(arrayBuf);
+        loadModel(group, `SketchUp GLTF 3D (${file.name})`);
       } else if (fileName.endsWith('.obj')) {
-        const group = parseObjToThree(content);
-        loadModel(group, `SketchUp 3D (${file.name})`);
+        // Universal OBJ format
+        const text = await file.text();
+        const group = parseObjToThree(text);
+        loadModel(group, `SketchUp 3D OBJ (${file.name})`);
+      } else if (fileName.endsWith('.dxf')) {
+        // AutoCAD DXF format
+        const text = await file.text();
+        const group = parseDxfToThree(text);
+        loadModel(group, `AutoCAD DXF (${file.name})`);
+      } else if (file.type.startsWith('image/')) {
+        // 2D image export snapshot from SketchUp
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (reader.result) {
+            onCaptureScene(reader.result as string, `Export SketchUp (${file.name})`);
+            onClose();
+          }
+        };
+        reader.readAsDataURL(file);
+      } else {
+        throw new Error(
+          `Formato "${file.name}" não suportado. Formatos aceitos: .skp, .dae, .obj, .gltf, .dxf`
+        );
       }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
+    } catch (err: any) {
+      console.error('File parsing error:', err);
+      setUploadError(
+        err.message || 'Falha ao processar ficheiro do SketchUp. Verifique o guia de exportação.'
+      );
+    } finally {
+      setIsParsing(false);
+      e.target.value = '';
+    }
   };
 
   // High-Resolution Snapshot Capture
@@ -324,22 +378,32 @@ export const CadViewerModal: React.FC<CadViewerModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             {/* Upload CAD/3D */}
-            <label className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer text-slate-200">
+            <label className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/20 to-amber-600/20 hover:from-amber-500/30 hover:to-amber-600/30 border border-amber-500/40 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer text-amber-200 shadow-sm">
               <Upload className="w-4 h-4 text-amber-400" />
-              <span>Abrir .OBJ / .DXF</span>
+              <span>{isParsing ? 'A carregar ficheiro...' : 'Abrir SketchUp / CAD (.skp, .obj, .dae, .gltf, .dxf)'}</span>
               <input
                 type="file"
                 onChange={handleFileUpload}
-                accept=".obj,.dxf,.gltf,.glb"
+                accept=".skp,.obj,.dae,.gltf,.glb,.dxf,.stl,image/*"
                 className="hidden"
+                disabled={isParsing}
               />
             </label>
 
             <button
+              onClick={() => setShowExportGuide(true)}
+              className="p-1.5 px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 hover:text-white flex items-center gap-1.5 transition cursor-pointer"
+              title="Guia: Como exportar do SketchUp para renderização"
+            >
+              <Info className="w-4 h-4 text-sky-400" />
+              <span className="hidden sm:inline">Guia SketchUp</span>
+            </button>
+
+            <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -492,6 +556,173 @@ export const CadViewerModal: React.FC<CadViewerModalProps> = ({
             </button>
           </div>
         </footer>
+
+        {/* Upload Error Alert */}
+        {uploadError && (
+          <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 max-w-md w-full p-4 rounded-xl bg-rose-950/95 border border-rose-800 text-rose-200 text-xs shadow-2xl flex items-start gap-3 backdrop-blur-md">
+            <div className="flex-1">
+              <strong className="block text-rose-100 font-semibold mb-0.5">Aviso de Formato SketchUp</strong>
+              <span>{uploadError}</span>
+            </div>
+            <button onClick={() => setUploadError(null)} className="text-rose-400 hover:text-white">✕</button>
+          </div>
+        )}
+
+        {/* SketchUp .SKP Preview & Converter Assistant Modal */}
+        {skpModalData && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md p-4 flex flex-col items-center justify-center animate-in fade-in duration-150">
+            <div className="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 text-slate-100">
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center text-amber-400 font-black font-mono text-sm">
+                    SKP
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Ficheiro SketchUp ({skpModalData.fileName})</h3>
+                    <p className="text-xs text-slate-400">
+                      {skpModalData.previewUrl
+                        ? 'Enquadramento e câmara da cena detetados com sucesso!'
+                        : 'Ficheiro nativo do Trimble SketchUp detetado.'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSkpModalData(null)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {skpModalData.previewUrl ? (
+                <div className="space-y-3">
+                  <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-950 border border-slate-800 shadow-inner group">
+                    <img
+                      src={skpModalData.previewUrl}
+                      alt="SketchUp Preview"
+                      className="w-full h-full object-contain"
+                    />
+                    <div className="absolute bottom-2 left-2 px-2.5 py-1 rounded-md bg-slate-900/90 text-[10px] font-mono text-emerald-300 border border-emerald-500/30">
+                      Câmara original preservada do SketchUp
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Extraímos a perspetiva exata salva no seu SketchUp! Pode enviá-la diretamente para o estúdio para simular iluminação solar e atmosfera em até 4K.
+                  </p>
+
+                  <div className="flex flex-col sm:flex-row gap-2 pt-2">
+                    <button
+                      onClick={() => {
+                        if (skpModalData.previewUrl) {
+                          onCaptureScene(skpModalData.previewUrl, `Cena SketchUp (${skpModalData.fileName})`);
+                          setSkpModalData(null);
+                          onClose();
+                        }
+                      }}
+                      className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 hover:from-amber-300 hover:to-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition cursor-pointer"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>Renderizar Esta Cena em 4K</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setSkpModalData(null);
+                        setShowExportGuide(true);
+                      }}
+                      className="py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition cursor-pointer"
+                    >
+                      Como orbitar em 3D
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3 text-xs text-slate-300">
+                  <p className="leading-relaxed">
+                    O formato <strong>.skp</strong> é um binário fechado do Trimble SketchUp. Para orbitar e navegar interativamente em 3D neste visualizador WebGL:
+                  </p>
+                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5 font-mono text-[11px] text-amber-300">
+                    <div>1. No SketchUp, vá a: <strong>Arquivo ➔ Exportar ➔ Modelo 3D</strong></div>
+                    <div>2. Selecione o formato: <strong>.OBJ</strong> ou <strong>.DAE (Collada)</strong></div>
+                    <div>3. Carregue o ficheiro exportado aqui para órbita 360° em tempo real!</div>
+                  </div>
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button
+                      onClick={() => setSkpModalData(null)}
+                      className="px-4 py-2 rounded-xl bg-amber-400 text-slate-950 font-bold text-xs"
+                    >
+                      Entendido
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* SketchUp Export Guide Dialog */}
+        {showExportGuide && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md p-4 flex flex-col items-center justify-center animate-in fade-in duration-150">
+            <div className="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 text-slate-100">
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-sky-500/20 border border-sky-500/40 flex items-center justify-center text-sky-400">
+                    <Info className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Como Usar Projetos do SketchUp</h3>
+                    <p className="text-xs text-slate-400">Instruções para exportar seus modelos e cenas</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowExportGuide(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                  <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                    <span>Opção 1: Navegação 3D Interativa (Órbita e Sol)</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    No SketchUp (qualquer versão, incluindo Web e Make):
+                  </p>
+                  <ol className="list-decimal list-inside space-y-1 font-mono text-[11px] text-slate-300">
+                    <li>Clique em <strong>Arquivo ➔ Exportar ➔ Modelo 3D</strong></li>
+                    <li>Escolha o formato <strong>.OBJ</strong> ou <strong>.DAE (COLLADA)</strong></li>
+                    <li>Carregue o arquivo aqui para orbitar e ajustar o sol livremente!</li>
+                  </ol>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                  <div className="font-semibold text-emerald-300 flex items-center gap-1.5">
+                    <span>Opção 2: Exportar Gráfico da Perspetiva (Render Direto)</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Se já enquadrou o ângulo perfeito no SketchUp:
+                  </p>
+                  <ol className="list-decimal list-inside space-y-1 font-mono text-[11px] text-slate-300">
+                    <li>Clique em <strong>Arquivo ➔ Exportar ➔ Gráfico 2D</strong> (.PNG ou .JPG)</li>
+                    <li>Carregue direto no LuzRender para simular a iluminação e clima!</li>
+                  </ol>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end pt-2">
+                <button
+                  onClick={() => setShowExportGuide(false)}
+                  className="px-5 py-2.5 rounded-xl bg-amber-400 text-slate-950 font-bold text-xs hover:bg-amber-300 transition"
+                >
+                  Fechar Guia
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
