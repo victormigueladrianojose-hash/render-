@@ -1,0 +1,6 @@
+{
+  "name": "LuzRender",
+  "description": "Simulação inteligente de iluminação e atmosfera arquitetural com IA.",
+  "requestFramePermissions": ["display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
